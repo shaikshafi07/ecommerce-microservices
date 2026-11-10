@@ -10,19 +10,31 @@ pipeline {
     }
 
     stages {
-
         stage('Checkout') {
             steps {
                 checkout scm
-                echo 'GitHub source code checked out successfully'
+            }
+        }
+
+        stage('Prepare Temporary JWT Test Keys') {
+            steps {
+                sh '''
+                    mkdir -p keys
+                    openssl genpkey -algorithm RSA \
+                      -pkeyopt rsa_keygen_bits:2048 \
+                      -out keys/jwt-private.pem
+
+                    openssl pkey \
+                      -in keys/jwt-private.pem \
+                      -pubout \
+                      -out keys/jwt-public.pem
+                '''
             }
         }
 
         stage('Maven Build and Test') {
             steps {
-                sh '''
-                    mvn -B clean verify
-                '''
+                sh 'mvn -B clean verify'
             }
         }
 
@@ -63,15 +75,19 @@ pipeline {
 
     post {
         always {
-            sh 'docker logout $ECR_REGISTRY || true'
+            sh '''
+                docker logout $ECR_REGISTRY || true
+                rm -f keys/jwt-private.pem keys/jwt-public.pem
+                rmdir keys 2>/dev/null || true
+            '''
         }
 
         success {
-            echo 'All three microservices were successfully pushed to ECR.'
+            echo 'All three microservices built and pushed successfully.'
         }
 
         failure {
-            echo 'Pipeline failed. Check the failed stage in Jenkins console output.'
+            echo 'Pipeline failed. Check the failed stage.'
         }
     }
 }
