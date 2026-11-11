@@ -73,15 +73,15 @@ pipeline {
                 sh '''
                     set -eu
 
-                    docker build -f user-service/Dockerfile \
-                      -t $ECR_REGISTRY/user-service:$IMAGE_TAG .
+                   	 docker build -f user-service/Dockerfile \
+            		-t ${ECR_REGISTRY}/user-service:${BUILD_NUMBER} user-service
 
-                    docker build -f product-service/Dockerfile \
-                      -t $ECR_REGISTRY/product-service:$IMAGE_TAG .
+			docker build -f product-service/Dockerfile \
+ 			 -t ${ECR_REGISTRY}/product-service:${BUILD_NUMBER} product-service
 
-                    docker build -f order-service/Dockerfile \
-                      -t $ECR_REGISTRY/order-service:$IMAGE_TAG .
-                '''
+			docker build -f order-service/Dockerfile \
+  			-t ${ECR_REGISTRY}/order-service:${BUILD_NUMBER} order-service               
+		'''
             }
         }
 
