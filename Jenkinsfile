@@ -118,80 +118,88 @@ pipeline {
             }
         }
 
-        stage('Deploy to EC2') {
-            steps {
-                sh '''
-                    set -eu
+       stage('Deploy to EC2') {
+          steps {
+          sh '''
+            set -eu
 
-                    # Authenticate Docker for the ubuntu deployment user.
-                    aws ecr get-login-password \
-                      --region "$AWS_REGION" |
-                    sudo -n -u ubuntu docker login \
-                      --username AWS \
-                      --password-stdin "$ECR_REGISTRY"
+            DEPLOY_ENV_FILE="/tmp/ecommerce-deploy-${BUILD_NUMBER}.env"
 
-                    # Pull the exact images pushed by this Jenkins build.
-                    sudo -n -u ubuntu env \
-                      ECR_REGISTRY="$ECR_REGISTRY" \
-                      IMAGE_TAG="$IMAGE_TAG" \
-                      docker compose \
-                      -f "$APP_DIR/docker-compose.yml" \
-                      --project-directory "$APP_DIR" \
-                      --profile apps pull \
-                      user-service product-service order-service
+            trap 'rm -f "$DEPLOY_ENV_FILE"' EXIT
 
-                    # Deploy without rebuilding images on EC2.
-                    sudo -n -u ubuntu env \
-                      ECR_REGISTRY="$ECR_REGISTRY" \
-                      IMAGE_TAG="$IMAGE_TAG" \
-                      docker compose \
-                      -f "$APP_DIR/docker-compose.yml" \
-                      --project-directory "$APP_DIR" \
-                      --profile apps up -d --no-build \
-                      user-service product-service order-service nginx
+            printf 'ECR_REGISTRY=%s\\nIMAGE_TAG=%s\\n' \
+              "$ECR_REGISTRY" "$IMAGE_TAG" > "$DEPLOY_ENV_FILE"
 
-                    # Verify service health.
-                    for service in user-service product-service order-service; do
-                        container_id=$(sudo -n -u ubuntu docker compose \
-                          -f "$APP_DIR/docker-compose.yml" \
-                          --project-directory "$APP_DIR" \
-                          --profile apps ps -q "$service")
+            chmod 644 "$DEPLOY_ENV_FILE"
 
-                        test -n "$container_id"
+            # Authenticate ubuntu user with ECR
+            aws ecr get-login-password \
+              --region "$AWS_REGION" |
+            sudo -n -u ubuntu docker login \
+              --username AWS \
+              --password-stdin "$ECR_REGISTRY"
 
-                        healthy=false
+            # Pull images from ECR
+            sudo -n -u ubuntu docker compose \
+              --env-file "$APP_DIR/.env" \
+              --env-file "$DEPLOY_ENV_FILE" \
+              -f "$APP_DIR/docker-compose.yml" \
+              --project-directory "$APP_DIR" \
+              --profile apps pull \
+              user-service product-service order-service
 
-                        for attempt in $(seq 1 60); do
-                            status=$(sudo -n -u ubuntu docker inspect \
-                              --format '{{.State.Health.Status}}' \
-                              "$container_id")
+            # Deploy the images
+            sudo -n -u ubuntu docker compose \
+              --env-file "$APP_DIR/.env" \
+              --env-file "$DEPLOY_ENV_FILE" \
+              -f "$APP_DIR/docker-compose.yml" \
+              --project-directory "$APP_DIR" \
+              --profile apps up -d --no-build \
+              user-service product-service order-service nginx
 
-                            if [ "$status" = "healthy" ]; then
-                                healthy=true
-                                break
-                            fi
+            # Verify service health
+            for service in user-service product-service order-service; do
+                container_id=$(sudo -n -u ubuntu docker compose \
+                  --env-file "$APP_DIR/.env" \
+                  --env-file "$DEPLOY_ENV_FILE" \
+                  -f "$APP_DIR/docker-compose.yml" \
+                  --project-directory "$APP_DIR" \
+                  --profile apps ps -q "$service")
 
-                            if [ "$status" = "unhealthy" ]; then
-                                break
-                            fi
+                test -n "$container_id"
 
-                            sleep 5
-                        done
+                healthy=false
 
-                        if [ "$healthy" != true ]; then
-                            echo "$service health verification failed"
-                            exit 1
-                        fi
+                for attempt in $(seq 1 60); do
+                    status=$(sudo -n -u ubuntu docker inspect \
+                      --format '{{.State.Health.Status}}' \
+                      "$container_id")
 
-                        echo "$service is healthy"
-                    done
-                '''
-            }
-        }
-    }
+                    if [ "$status" = "healthy" ]; then
+                        healthy=true
+                        break
+                    fi
 
-    post {
-        always {
+                    if [ "$status" = "unhealthy" ]; then
+                        break
+                    fi
+
+                    sleep 5
+                done
+
+                if [ "$healthy" != true ]; then
+                    echo "$service health verification failed"
+                    exit 1
+                fi
+
+                echo "$service is healthy"
+                   done
+             '''
+           }
+       }
+
+       post {
+          always {
             sh '''
                 docker logout "$ECR_REGISTRY" 2>/dev/null || true
                 sudo -n -u ubuntu docker logout "$ECR_REGISTRY" \
