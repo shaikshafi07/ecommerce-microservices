@@ -197,6 +197,7 @@ pipeline {
              '''
            }
        }
+    }
 
        post {
           always {
@@ -207,16 +208,16 @@ pipeline {
 
                 rm -f keys/jwt-private.pem keys/jwt-public.pem
             '''
-        }
+          }
 
         success {
             echo "SUCCESS: Images ${IMAGE_TAG} pushed and deployed."
-        }
+         }
 
         failure {
             echo 'FAILURE: Review the failed pipeline stage and console log.'
         }
-    }
+      }
 }
 
 
