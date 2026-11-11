@@ -8,9 +8,9 @@ pipeline {
     }
 
     environment {
-        AWS_REGION = 'ap-south-1'
+        AWS_REGION = 'us-east-1'
         AWS_ACCOUNT_ID = '415081250301'
-        ECR_REGISTRY = '415081250301.dkr.ecr.ap-south-1.amazonaws.com'
+        ECR_REGISTRY = '415081250301.dkr.ecr.us-east-1.amazonaws.com'
         IMAGE_TAG = "${BUILD_NUMBER}"
 
         APP_DIR = '/home/ubuntu/microservices-project/ecommerce-microservices'
