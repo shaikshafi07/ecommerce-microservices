@@ -8,10 +8,12 @@ pipeline {
     }
 
     environment {
-        AWS_REGION = 'us-east-1'
+        AWS_REGION = 'ap-south-1'
         AWS_ACCOUNT_ID = '415081250301'
-        ECR_REGISTRY = '415081250301.dkr.ecr.us-east-1.amazonaws.com'
+        ECR_REGISTRY = '415081250301.dkr.ecr.ap-south-1.amazonaws.com'
         IMAGE_TAG = "${BUILD_NUMBER}"
+
+        APP_DIR = '/home/ubuntu/microservices-project/ecommerce-microservices'
     }
 
     stages {
@@ -19,6 +21,25 @@ pipeline {
         stage('Checkout') {
             steps {
                 checkout scm
+            }
+        }
+
+        stage('Configuration Validation') {
+            steps {
+                sh '''
+                    set -eu
+
+                    git diff --check
+
+                    test -f user-service/Dockerfile
+                    test -f product-service/Dockerfile
+                    test -f order-service/Dockerfile
+                    test -f docker-compose.yml
+                    test -f nginx/nginx.conf
+
+                    docker version
+                    docker compose version
+                '''
             }
         }
 
@@ -43,19 +64,7 @@ pipeline {
 
         stage('Maven Build and Test') {
             steps {
-                sh '''
-                    set -eu
-                    mvn -B clean verify
-                '''
-            }
-        }
-
-        stage('Remove Temporary Test Keys') {
-            steps {
-                sh '''
-                    rm -f keys/jwt-private.pem keys/jwt-public.pem
-                    rmdir keys 2>/dev/null || true
-                '''
+                sh 'mvn -B clean verify'
             }
         }
 
@@ -64,33 +73,35 @@ pipeline {
                 sh '''
                     set -eu
 
-                    docker build \
-                      -f user-service/Dockerfile \
+                    docker build -f user-service/Dockerfile \
                       -t $ECR_REGISTRY/user-service:$IMAGE_TAG .
 
-                    docker build \
-                      -f product-service/Dockerfile \
+                    docker build -f product-service/Dockerfile \
                       -t $ECR_REGISTRY/product-service:$IMAGE_TAG .
 
-                    docker build \
-                      -f order-service/Dockerfile \
+                    docker build -f order-service/Dockerfile \
                       -t $ECR_REGISTRY/order-service:$IMAGE_TAG .
                 '''
             }
         }
 
-        stage('ECR Login') {
+        stage('ECR Authentication') {
             steps {
                 sh '''
                     set -eu
 
                     aws sts get-caller-identity
 
+                    aws ecr describe-repositories \
+                      --region "$AWS_REGION" \
+                      --repository-names \
+                      user-service product-service order-service
+
                     aws ecr get-login-password \
-                      --region $AWS_REGION |
+                      --region "$AWS_REGION" |
                     docker login \
                       --username AWS \
-                      --password-stdin $ECR_REGISTRY
+                      --password-stdin "$ECR_REGISTRY"
                 '''
             }
         }
@@ -106,24 +117,98 @@ pipeline {
                 '''
             }
         }
+
+        stage('Deploy to EC2') {
+            steps {
+                sh '''
+                    set -eu
+
+                    # Authenticate Docker for the ubuntu deployment user.
+                    aws ecr get-login-password \
+                      --region "$AWS_REGION" |
+                    sudo -n -u ubuntu docker login \
+                      --username AWS \
+                      --password-stdin "$ECR_REGISTRY"
+
+                    # Pull the exact images pushed by this Jenkins build.
+                    sudo -n -u ubuntu env \
+                      ECR_REGISTRY="$ECR_REGISTRY" \
+                      IMAGE_TAG="$IMAGE_TAG" \
+                      docker compose \
+                      -f "$APP_DIR/docker-compose.yml" \
+                      --project-directory "$APP_DIR" \
+                      --profile apps pull \
+                      user-service product-service order-service
+
+                    # Deploy without rebuilding images on EC2.
+                    sudo -n -u ubuntu env \
+                      ECR_REGISTRY="$ECR_REGISTRY" \
+                      IMAGE_TAG="$IMAGE_TAG" \
+                      docker compose \
+                      -f "$APP_DIR/docker-compose.yml" \
+                      --project-directory "$APP_DIR" \
+                      --profile apps up -d --no-build \
+                      user-service product-service order-service nginx
+
+                    # Verify service health.
+                    for service in user-service product-service order-service; do
+                        container_id=$(sudo -n -u ubuntu docker compose \
+                          -f "$APP_DIR/docker-compose.yml" \
+                          --project-directory "$APP_DIR" \
+                          --profile apps ps -q "$service")
+
+                        test -n "$container_id"
+
+                        healthy=false
+
+                        for attempt in $(seq 1 60); do
+                            status=$(sudo -n -u ubuntu docker inspect \
+                              --format '{{.State.Health.Status}}' \
+                              "$container_id")
+
+                            if [ "$status" = "healthy" ]; then
+                                healthy=true
+                                break
+                            fi
+
+                            if [ "$status" = "unhealthy" ]; then
+                                break
+                            fi
+
+                            sleep 5
+                        done
+
+                        if [ "$healthy" != true ]; then
+                            echo "$service health verification failed"
+                            exit 1
+                        fi
+
+                        echo "$service is healthy"
+                    done
+                '''
+            }
+        }
     }
 
     post {
         always {
             sh '''
-                docker logout $ECR_REGISTRY 2>/dev/null || true
+                docker logout "$ECR_REGISTRY" 2>/dev/null || true
+                sudo -n -u ubuntu docker logout "$ECR_REGISTRY" \
+                  2>/dev/null || true
+
                 rm -f keys/jwt-private.pem keys/jwt-public.pem
-                rmdir keys 2>/dev/null || true
             '''
         }
 
         success {
-            echo 'SUCCESS: All three microservices built and pushed to ECR.'
+            echo "SUCCESS: Images ${IMAGE_TAG} pushed and deployed."
         }
 
         failure {
-            echo 'FAILURE: Check the failed pipeline stage and console output.'
+            echo 'FAILURE: Review the failed pipeline stage and console log.'
         }
     }
 }
+
 
